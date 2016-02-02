@@ -1,19 +1,33 @@
 package com.example.android.bluetoothadvertisements;
 
+import android.annotation.TargetApi;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothServerSocket;
+import android.bluetooth.BluetoothSocket;
 import android.bluetooth.le.AdvertiseCallback;
 import android.bluetooth.le.AdvertiseData;
 import android.bluetooth.le.AdvertiseSettings;
 import android.bluetooth.le.BluetoothLeAdvertiser;
 import android.content.Context;
 import android.content.Intent;
+import android.os.AsyncTask;
+import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.util.Log;
 import android.widget.Toast;
 
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -47,6 +61,11 @@ public class AdvertiserService extends Service {
     private Handler mHandler;
 
     private Runnable timeoutRunnable;
+
+    private BluetoothAdapter mBluetoothAdapter;
+    private BluetoothServerSocket mBTServerSocket;
+    private BluetoothSocket mBTSocket;
+
 
     /**
      * Length of time to allow advertising before automatically shutting off. (10 minutes)
@@ -102,6 +121,8 @@ public class AdvertiserService extends Service {
             }
         }
 
+        mBluetoothAdapter = ((BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE))
+                .getAdapter();
     }
 
     /**
@@ -127,6 +148,8 @@ public class AdvertiserService extends Service {
     private void startAdvertising() {
         Log.d(TAG, "Service: Starting Advertising");
 
+        Log.d(TAG, "TLG ----------- trying to open the BluetoothServerSocket -------");
+
         if (mAdvertiseCallback == null) {
             AdvertiseSettings settings = buildAdvertiseSettings();
             AdvertiseData data = buildAdvertiseData();
@@ -137,9 +160,155 @@ public class AdvertiserService extends Service {
                         mAdvertiseCallback);
             }
         }
+
+        /* Use the Reflection method to access hidden java function
+         * into BluetoothAdapter class.
+         */
+        final Class BTAClass;
+        final Method BTAClassMethod;
+
+        try {
+            BTAClass = Class.forName(mBluetoothAdapter.getClass().getName());
+        } catch (ClassNotFoundException e) {
+            Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+            return;
+        }
+        try {
+            Class[] cArg = new Class[1];
+            cArg[0] = int.class;
+            BTAClassMethod = BTAClass.getDeclaredMethod("listenUsingL2capOn", cArg);
+        } catch (NoSuchMethodException e) {
+            Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+            return;
+        }
+
+        BTAClassMethod.setAccessible(true);
+
+        try {
+            mBTServerSocket = (BluetoothServerSocket) BTAClassMethod.invoke(mBluetoothAdapter, 0x20025);
+        } catch (InvocationTargetException e) {
+            Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+            return;
+        } catch (IllegalAccessException e) {
+            Log.e(TAG, "ERROR setting up the Reflection for listenUsingL2capOn");
+            return;
+        }
+
+        new OpenBluetoothSocket().execute();
     }
 
-    /**
+
+
+    private class OpenBluetoothSocket extends AsyncTask<Void, Void, Void> {
+
+        @Override
+        protected Void doInBackground(Void... params) {
+            try {
+                mBTSocket = mBTServerSocket.accept();
+            } catch (IOException e) {
+                Log.e(TAG, "ERROR opening the BluetoothServerSocket");
+            }
+            Log.d(TAG, "TLG --------- connection successfully created -----------");
+            return null;
+        }
+
+        @Override
+        protected void onPostExecute(Void aVoid) {
+            Context context = getApplicationContext();
+            CharSequence text = "Bluetooth Connected";
+            int duration = Toast.LENGTH_SHORT;
+
+            Toast toast = Toast.makeText(context, text, duration);
+            toast.show();
+
+            new ReceiveDataBluetooth().execute();
+        }
+    }
+
+    private class ReceiveDataBluetooth extends AsyncTask<Void, Void, Void> {
+
+        @TargetApi(Build.VERSION_CODES.M)
+        @Override
+        protected Void doInBackground(Void... params) {
+            try {
+                byte[] contents = new byte[Constants.BUFFER_SIZE];
+
+                final File sdcard = Environment.getExternalStorageDirectory();
+                final File filePcm = new File(sdcard.getAbsolutePath() + Constants.FILE);
+                //new File(sdcard.getAbsolutePath() + "/" + Constants.FOLDER + "/output.pcm");
+
+                boolean connected = mBTSocket.isConnected();
+                Log.d(TAG, "TLG --------- connected? " + filePcm.canWrite() + " -----------");
+
+                InputStream inputStream = mBTSocket.getInputStream();
+                BufferedOutputStream buf = new BufferedOutputStream(new FileOutputStream(filePcm));
+                Log.d(TAG, "TLG --------- Stream created -----------");
+
+                int counter = 50;
+                int byte_available = 0;
+
+                while (inputStream.available() == 0) {
+                    SystemClock.sleep(50);
+                }
+
+                while (((byte_available = inputStream.available()) > 0 ) && mBTSocket.isConnected()) {
+                    if (byte_available > 0) {
+                        Log.d(TAG, "TLG --------- Available to be written to file " + byte_available + " -----------");
+
+                        if (byte_available > Constants.BUFFER_SIZE) {
+                            byte_available = Constants.BUFFER_SIZE;
+                        }
+
+                        if (inputStream.read(contents, 0, byte_available) < 0) {
+                            Log.e(TAG, "TLG ERROR reading the input stream");
+                            byte_available = 0;
+                        }
+                        Log.d(TAG, "TLG --------- Writing to file " + byte_available + " -----------");
+                        Log.d(TAG, "TLG --------- Remaining in file " + inputStream.available() + " -----------");
+
+                        buf.write(contents, 0, byte_available);
+                    } else {
+                        counter = counter - 1;
+                        Log.d(TAG, "TLG --------- Skipping "+ counter + " -----------");
+                    }
+                    Log.d(TAG, "TLG --------- Iteration completed, counter: "+ counter + " -----------");
+
+                    SystemClock.sleep(10);
+                }
+                Log.d(TAG, "TLG --------- While loop completed -----------");
+
+                inputStream.close();
+                buf.close();
+/*
+                byte buffer[] = new byte[10];
+                InputStream inputStream = mBTSocket.getInputStream();
+                int maxReceivePacketSize = mBTSocket.getMaxReceivePacketSize();
+                Log.d(TAG, "TLG --------- Max received packet size " + maxReceivePacketSize +" -----------");
+
+                inputStream.read(buffer);
+                for (int i = 0; i < buffer.length; ++i) {
+                    Log.d(TAG, "buffer[" + i + "] = " + buffer[i]);
+                }
+                */
+            } catch (IOException e) {
+                Log.e(TAG, "ERROR opening the BluetoothServerSocket");
+            }
+            Log.d(TAG, "TLG --------- connection successfully created -----------");
+            return null;
+        }
+
+        @Override
+        protected void onPostExecute(Void aVoid) {
+            Context context = getApplicationContext();
+            CharSequence text = "Data Received";
+            int duration = Toast.LENGTH_SHORT;
+
+            Toast toast = Toast.makeText(context, text, duration);
+            toast.show();
+        }
+    }
+
+        /**
      * Stops BLE Advertising.
      */
     private void stopAdvertising() {
@@ -183,6 +352,7 @@ public class AdvertiserService extends Service {
         AdvertiseSettings.Builder settingsBuilder = new AdvertiseSettings.Builder();
         settingsBuilder.setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER);
         settingsBuilder.setTimeout(0);
+        settingsBuilder.setConnectable(true);
         return settingsBuilder.build();
     }
 

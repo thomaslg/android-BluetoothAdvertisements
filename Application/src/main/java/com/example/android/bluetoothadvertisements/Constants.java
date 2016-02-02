@@ -35,4 +35,8 @@ public class Constants {
 
     public static final int REQUEST_ENABLE_BT = 1;
 
+    public static final String FOLDER = "/Development/NXP_BLE";
+    public static final String FILE = "/output.pcm";
+    public static final int BUFFER_SIZE = 1024;
+
 }

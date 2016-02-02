@@ -49,7 +49,7 @@ public class ScannerFragment extends ListFragment {
     /**
      * Stops scanning after 5 seconds.
      */
-    private static final long SCAN_PERIOD = 5000;
+    private static final long SCAN_PERIOD = 20000;
 
     private BluetoothAdapter mBluetoothAdapter;
 
